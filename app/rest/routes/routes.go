@@ -130,7 +130,7 @@ func SetupRouter(contract *client.Contract) *gin.Engine {
 		v1.GET("/voters", func(c *gin.Context) {
 			getAllVoters(contract, c)
 		})
-		v1.POST("/ballot/vote", func(c *gin.Context) {
+		v1.POST("/vote", func(c *gin.Context) {
 			castVote(contract, c)
 		})
 
