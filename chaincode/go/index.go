@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hyperledger/fabric-chaincode-go/shim"
@@ -17,10 +18,7 @@ type VotingChaincode struct {
 // init ledger with 4 voting cadidates
 type candidate struct {
 	Name      string         `json:"name"`
-	StudentID string         `json:"studentID"`
-	Faculty   string         `json:"faculty"`
-	Party     string         `json:"party"`
-	Avatar    string         `json:"avatar"`
+	ID        string         `json:"id"`
 	Elections []electionInfo `json:"elections"`
 }
 
@@ -29,22 +27,14 @@ type electionInfo struct {
 	Votes      int    `json:"votes"`
 }
 
-// voter struct
-type voter struct {
-	StudentID  string `json:"studentID"`
-	HasVoted   bool   `json:"hasVoted"`
-	ElectionID string `json:"electionID"`
-	Email      string `json:"email"`
-}
-
 type voterV2 struct {
-	ID                  string                `json:"id"`
-	ElectionEligibility []ElectionEligibility `json:"electionEligibility"`
+	ID              string            `json:"id"`
+	ElectionHistory []ElectionHistory `json:"electionHistory"`
 }
 
-type ElectionEligibility struct {
+type ElectionHistory struct {
 	ElectionID string `json:"electionID"`
-	HasVoted   bool   `json:"hasVoted"`
+	VotedTo    string `json:"votedTo"`
 }
 
 type election struct {
@@ -56,11 +46,6 @@ type election struct {
 	UpdatedAt    *string `json:"updatedAt"`
 }
 
-type electionResults struct {
-	Candidates []candidate `json:"candidates"`
-	Winner     candidate   `json:"winner"`
-}
-
 func main() {
 	err := shim.Start(new(VotingChaincode))
 	if err != nil {
@@ -68,7 +53,7 @@ func main() {
 	}
 }
 
-func (t *VotingChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
+func (t *VotingChaincode) Init(_ shim.ChaincodeStubInterface) pb.Response {
 
 	return shim.Success(nil)
 }
@@ -78,77 +63,65 @@ func (t *VotingChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
 func (t *VotingChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
 	function, args := stub.GetFunctionAndParameters()
 
-	if function == "initLedger" {
+	switch function {
+	case "initLedger":
 		return t.Init(stub)
-	} else if function == "vote" {
-		return t.vote(stub, args)
-	} else if function == "voteV2" {
+	case "getFinalResult":
+		return t.GetFinalResult(stub, args)
+	case "vote":
 		return t.voteV2(stub, args)
-	} else if function == "createElection" {
+	case "createElection":
 		return t.createElection(stub, args)
-	} else if function == "createVoter" {
+	case "createVoter":
 		return t.createVoter(stub, args)
-	} else if function == "createCandidate" {
+	case "createCandidate":
 		return t.createCandidate(stub, args)
-	} else if function == "getElectionById" {
+	case "getElectionById":
 		return t.getElectionById(stub, args)
-	} else if function == "getAllElections" {
+	case "getAllElections":
 		return t.getAllElections(stub)
-	} else if function == "updateElection" {
+	case "updateElection":
 		return t.updateElection(stub, args)
-	} else if function == "getCandidatesById" {
+	case "getCandidatesById":
 		return t.getCandidatesById(stub, args)
-	} else if function == "queryByRange" {
+	case "getVoter":
+		return t.getVoter(stub, args)
+	case "queryByRange":
 		return t.queryByRange(stub, args)
+	default:
+		fmt.Println("invoke did not find func: " + function) //error
+		return shim.Error("Received unknown function invocation")
 	}
-	fmt.Println("invoke did not find func: " + function) //error
-	return shim.Error("Received unknown function invocation")
-}
-
-// query function
-func (t *VotingChaincode) Query(stub shim.ChaincodeStubInterface) pb.Response {
-	function, args := stub.GetFunctionAndParameters()
-	if function == "getElectionById" {
-		return t.getElectionById(stub, args)
-	} else if function == "getAllElections" {
-		return t.getAllElections(stub)
-	} else if function == "getCandidatesById" {
-		return t.getCandidatesById(stub, args)
-	} else if function == "queryByRange" {
-		return t.queryByRange(stub, args)
-	}
-
-	fmt.Println("invoke did not find func: " + function)
-	return shim.Error("Received unknown function invocation")
 }
 
 // create voter function
 func (t *VotingChaincode) createVoter(stub shim.ChaincodeStubInterface, args []string) pb.Response {
-	if len(args) != 3 {
+	if len(args) != 1 {
 		return shim.Error("Incorrect number of arguments. Expecting 3")
 	}
-	studentId := "voter." + args[0]
-	electionId := args[1]
-	email := args[2]
+	voterID := args[0]
+	if !strings.HasPrefix(voterID, "voter.") {
+		voterID = "voter." + args[0]
+	}
 
-	var newVoter = voter{StudentID: studentId, HasVoted: false, ElectionID: electionId, Email: email}
+	var newVoter = voterV2{ID: voterID, ElectionHistory: nil}
 
 	// find voter in ledger
-	dupeVoterAsBytes, err := stub.GetState(studentId)
+	dupeVoterAsBytes, err := stub.GetState(voterID)
 	if err != nil {
-		return shim.Error("Failed to get voter: " + studentId)
+		return shim.Error("Failed to get voter: " + voterID)
 	}
-	dupeVoter := voter{}
+	dupeVoter := voterV2{}
 	// if voter exists, return error
 	if dupeVoterAsBytes != nil {
 		json.Unmarshal(dupeVoterAsBytes, &dupeVoter)
-		if dupeVoter.StudentID == studentId {
+		if dupeVoter.ID == voterID {
 			return shim.Error("Voter already exists")
 		}
 	}
 
 	newVoterAsBytes, _ := json.Marshal(newVoter)
-	err = stub.PutState(args[0], newVoterAsBytes)
+	err = stub.PutState(voterID, newVoterAsBytes)
 
 	if err != nil {
 		fmt.Println("Error creating voter")
@@ -159,93 +132,81 @@ func (t *VotingChaincode) createVoter(stub shim.ChaincodeStubInterface, args []s
 
 }
 
-// vote function
-func (t *VotingChaincode) vote(stub shim.ChaincodeStubInterface, args []string) pb.Response {
-	// check if voter has already voted
-	voterId := args[0]
-	candidateId := args[1]
-	electionId := args[2]
-
-	voterAsBytes, err := stub.GetState(voterId)
+// get voter function
+func (t *VotingChaincode) getVoter(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 3")
+	}
+	voterID := args[0]
+	if !strings.HasPrefix(voterID, "voter.") {
+		voterID = "voter." + args[0]
+	}
+	// find voter in ledger
+	dupeVoterAsBytes, err := stub.GetState(voterID)
 	if err != nil {
-		return shim.Error("Failed to get voter: " + voterId)
-	}
-	voter := voter{}
-	json.Unmarshal(voterAsBytes, &voter)
-	if voter.HasVoted {
-		return shim.Error("Voter has already voted")
+		return shim.Error("Failed to get voter: " + voterID)
 	}
 
-	// update candidate votes
-	candidateAsBytes, err := stub.GetState(candidateId)
-	if err != nil {
-		return shim.Error("Failed to get candidate: " + candidateId)
+	if dupeVoterAsBytes != nil {
+		return shim.Success(dupeVoterAsBytes)
 	}
-	candidate := candidate{}
-	json.Unmarshal(candidateAsBytes, &candidate)
-	contestedElection := candidate.Elections
-	for i := 0; i < len(contestedElection); i++ {
-		if contestedElection[i].ElectionID == electionId {
-			contestedElection[i].Votes++
-		}
-	}
-	candidate.Elections = contestedElection
-	candidateAsBytes, _ = json.Marshal(candidate)
 
-	stub.PutState(candidateId, candidateAsBytes)
-
-	voter.HasVoted = true
-	voterAsBytes, _ = json.Marshal(voter)
-	stub.PutState(voterId, voterAsBytes)
-
-	return shim.Success(nil)
+	return shim.Error("not found")
 }
 
-// TODO: vote function v2, takes in generated id and email from pg, and CandidateID and ElectionID
 // when vote is casted, the generated id is stored in the ledger
-// if the generated id is found in the ledger, chek if election id exist (this means the voter has voted for this election
+// if the generated id is found in the ledger, chek if election id exist (this means the voter has voted for this election)
 // if generated id is not found in the ledger, create new voter and store in ledger
 // if generated id is found in the ledger, but election id is not found, update the voter and store in ledger
 // this means we need a new voter model, the current can only store one election id
 // and its checked using hasVoted flag.
 func (t *VotingChaincode) voteV2(stub shim.ChaincodeStubInterface, args []string) pb.Response {
-	Id := args[0]
+	VoterID := args[0]
+	if !strings.HasPrefix(VoterID, "voter.") {
+		VoterID = "voter." + args[0]
+	}
 	CandidateID := args[1]
 	ElectionID := args[2]
 
 	if len(args) != 3 {
 		return shim.Error("Incorrect number of arguments. Expecting 3")
 	}
-	VoterID := "voter." + Id
 	// find voter in ledger
 	voterAsBytes, err := stub.GetState(VoterID)
 	if err != nil {
 		return shim.Error("Failed to get voter: " + VoterID)
 	}
 
-	// if voter exists, check if election id exist
-	if voterAsBytes != nil {
-		voter := voterV2{}
-		json.Unmarshal(voterAsBytes, &voter)
+	if voterAsBytes == nil {
+		fmt.Printf("voter not found")
+		return shim.Error("voter not found")
+	}
 
-		// if election id exist, return error
-		for i := 0; i < len(voter.ElectionEligibility); i++ {
-			if voter.ElectionEligibility[i].ElectionID == ElectionID && voter.ElectionEligibility[i].HasVoted {
-				fmt.Printf("Voter has already voted for this election")
-				return shim.Error("Voter has already voted")
-			}
+	voterInfo := voterV2{}
+	err = json.Unmarshal(voterAsBytes, &voterInfo)
+	if err != nil {
+		fmt.Println("Failed to get voter: ", err)
+		return shim.Error("Failed to unmarshal voter")
+	}
+
+	// if election id exist, return error
+	for i := 0; i < len(voterInfo.ElectionHistory); i++ {
+		if voterInfo.ElectionHistory[i].ElectionID == ElectionID && voterInfo.ElectionHistory[i].VotedTo != "" {
+			fmt.Printf("Voter has already voted for this election")
+			return shim.Error("Voter has already voted")
 		}
 	}
 
 	// get election
 	electionAsBytes, err := stub.GetState(ElectionID)
 	election := election{}
-	json.Unmarshal(electionAsBytes, &election)
+	err = json.Unmarshal(electionAsBytes, &election)
 	if err != nil {
 		return shim.Error("Failed to get election: " + ElectionID)
 	}
+
 	// parse election end date to datetime
-	electionEndDate, err := time.Parse(time.RFC3339, election.EndDate)
+	electionEndDate, err := time.Parse(time.DateTime, strings.TrimSpace(election.EndDate))
 	if err != nil {
 		return shim.Error("Failed to parse election end date: " + election.EndDate)
 	}
@@ -259,8 +220,15 @@ func (t *VotingChaincode) voteV2(stub shim.ChaincodeStubInterface, args []string
 	if err != nil {
 		return shim.Error("Failed to get candidate: " + CandidateID)
 	}
+	if candidateAsBytes == nil {
+		return shim.Error("invalid candidate")
+	}
+
 	candidate := candidate{}
-	json.Unmarshal(candidateAsBytes, &candidate)
+	err = json.Unmarshal(candidateAsBytes, &candidate)
+	if err != nil {
+		return shim.Error("Failed to get candidate: " + CandidateID)
+	}
 	contestedElection := candidate.Elections
 	for i := 0; i < len(contestedElection); i++ {
 		fmt.Println(contestedElection[i].ElectionID)
@@ -273,23 +241,27 @@ func (t *VotingChaincode) voteV2(stub shim.ChaincodeStubInterface, args []string
 	stub.PutState(CandidateID, candidateAsBytes)
 	// candidate votes ledger updated when
 
-	electionEligibility := ElectionEligibility{ElectionID: ElectionID, HasVoted: true}
+	electionEligibility := ElectionHistory{ElectionID: ElectionID, VotedTo: CandidateID}
 	// update voter ledger
 	// if voter does not exist, create new voter
-	if voterAsBytes == nil {
-		voter := voterV2{}
-		voter.ID = Id
-		voter.ElectionEligibility = append(voter.ElectionEligibility, electionEligibility)
-		voterAsBytes, _ = json.Marshal(voter)
-		stub.PutState(VoterID, voterAsBytes)
-	} else {
-		// if voter exist, update voter
-		voter := voterV2{}
-		json.Unmarshal(voterAsBytes, &voter)
-		voter.ElectionEligibility = append(voter.ElectionEligibility, electionEligibility)
-		voterAsBytes, _ = json.Marshal(voter)
-		stub.PutState(VoterID, voterAsBytes)
+
+	// if voter exist, update voter
+	voter := voterV2{}
+	json.Unmarshal(voterAsBytes, &voter)
+	voter.ElectionHistory = append(voter.ElectionHistory, electionEligibility)
+	voterAsBytes, _ = json.Marshal(voter)
+	err = stub.PutState(VoterID, voterAsBytes)
+	if err != nil {
+		fmt.Println("failed to put voter", err.Error())
+		return shim.Error("failed to commit to network")
 	}
+
+	err = stub.PutState("record_"+ElectionID+"_"+VoterID, []byte(CandidateID))
+	if err != nil {
+		fmt.Println("failed to put history of election voting", err.Error())
+		return shim.Error("failed to commit to network")
+	}
+
 	return shim.Success(nil)
 }
 
@@ -308,14 +280,27 @@ func (t *VotingChaincode) getElectionById(stub shim.ChaincodeStubInterface, args
 
 // get all created elections function
 func (t *VotingChaincode) getAllElections(stub shim.ChaincodeStubInterface) pb.Response {
-	elections := []election{}
-	electionsAsBytes, err := stub.GetState("elections")
+	resultsIterator, err := stub.GetStateByRange("elections", "elections.z")
 	if err != nil {
 		return shim.Error("Failed to get elections")
 	}
-	json.Unmarshal(electionsAsBytes, &elections)
-	electionsAsBytes, _ = json.Marshal(elections)
-	return shim.Success(electionsAsBytes)
+	defer resultsIterator.Close()
+	// buffer is a JSON array containing QueryResults
+	elections := []election{}
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		var e election
+		if err := json.Unmarshal(queryResponse.Value, &e); err != nil {
+			return shim.Error("Failed to unmarshal the election")
+		}
+		elections = append(elections, e)
+	}
+	res, _ := json.Marshal(elections)
+	return shim.Success(res)
+
 }
 
 // create election function
@@ -330,6 +315,9 @@ func (t *VotingChaincode) createElection(stub shim.ChaincodeStubInterface, args 
 	// hence all peers will have the same electionID
 
 	electionID := args[3]
+	if !strings.HasPrefix(electionID, "election.") {
+		electionID = "election." + electionID
+	}
 	createdAt := args[4]
 
 	// check if election name is provided
@@ -363,54 +351,65 @@ func (t *VotingChaincode) createElection(stub shim.ChaincodeStubInterface, args 
 // else create candidate
 // create candidate function
 func (t *VotingChaincode) createCandidate(stub shim.ChaincodeStubInterface, args []string) pb.Response {
-	if len(args) != 6 {
+	if len(args) != 3 {
 		return shim.Error("Incorrect number of arguments. Expecting 3")
 	}
 
 	candidateName := args[0]
-	// create a special ID for candidate by concatenating C_ and studentId
-	studentId := "candidate." + args[1]
+	// create a special ID for candidate by concatenating C_ and userID
+	userID := "candidate." + args[1]
 	electionId := args[2]
-	faculty := args[3]
-	party := args[4]
-	avatar := args[5]
 
 	// check if cadidate exist
-	candidateAsBytes, err := stub.GetState(studentId)
+	candidateAsBytes, err := stub.GetState(userID)
 	if err != nil {
-		return shim.Error("Failed to get candidate: " + studentId)
+		return shim.Error("Failed to get candidate: " + userID)
 	}
+
+	electoinInfo, err := stub.GetState(electionId)
+	if err != nil {
+		return shim.Error("Failed to get election: " + electionId)
+	}
+	if electoinInfo == nil {
+		return shim.Error("election not found ")
+	}
+
 	if candidateAsBytes != nil {
 		// if candidate exists, update candidate and append electionId to candidate.Elections
-		candidate := candidate{}
-		json.Unmarshal(candidateAsBytes, &candidate)
+		candidateInfo := candidate{}
+		json.Unmarshal(candidateAsBytes, &candidateInfo)
+
+		for _, e := range candidateInfo.Elections {
+			// check if the election has been already included in candidate's elections
+			if e.ElectionID == electionId {
+				fmt.Println("already belongs to this election")
+				return shim.Error("already belongs to this election")
+			}
+		}
+
 		info := electionInfo{ElectionID: electionId, Votes: 0}
-		candidate.Elections = append(candidate.Elections, info)
-		candidateAsBytes, _ := json.Marshal(candidate)
-		err := stub.PutState(studentId, candidateAsBytes)
+		candidateInfo.Elections = append(candidateInfo.Elections, info)
+		candidateAsBytes, _ := json.Marshal(candidateInfo)
+		err := stub.PutState(userID, candidateAsBytes)
 		if err != nil {
 			fmt.Println("Error updating candidate")
 			return shim.Error(err.Error())
 		}
-		fmt.Println("candidate update successful %s", studentId)
+		fmt.Println("candidate update successful %s", userID)
 		return shim.Success(nil)
 	} else {
 		// else create candidate
 		info := electionInfo{ElectionID: electionId, Votes: 0}
-		candidate := candidate{
-			StudentID: studentId,
+		candidateInfo := candidate{
 			Name:      candidateName,
-			Faculty:   faculty,
-			Party:     party,
-			Avatar:    avatar,
 			Elections: []electionInfo{info}}
-		candidateAsBytes, _ := json.Marshal(candidate)
-		err := stub.PutState(studentId, candidateAsBytes)
+		candidateAsBytes, _ := json.Marshal(candidateInfo)
+		err := stub.PutState(userID, candidateAsBytes)
 		if err != nil {
 			fmt.Println("Error creating candidate")
 			return shim.Error(err.Error())
 		}
-		fmt.Println("candidate creation successful %s", studentId)
+		fmt.Println("candidate creation successful %s", userID)
 		return shim.Success(nil)
 	}
 
@@ -459,17 +458,17 @@ func (t *VotingChaincode) getCandidatesById(stub shim.ChaincodeStubInterface, ar
 	// electionid is stored in the candidate object
 	// so you need to get all candidateId keys and get the candidate object
 	// that match the electionId
-	studentIdsAsBytes, err := stub.GetStateByRange("candidate.", "candidate.z")
+	userIDsAsBytes, err := stub.GetStateByRange("candidate.", "candidate.z")
 	if err != nil {
 		return shim.Error("Failed to get candidate: " + electionId)
 	}
-	defer studentIdsAsBytes.Close()
+	defer userIDsAsBytes.Close()
 	// buffer is a JSON array containing QueryResults
 	var buffer bytes.Buffer
 	buffer.WriteString("[")
 	bArrayMemberAlreadyWritten := false
-	for studentIdsAsBytes.HasNext() {
-		queryResponse, err := studentIdsAsBytes.Next()
+	for userIDsAsBytes.HasNext() {
+		queryResponse, err := userIDsAsBytes.Next()
 		if err != nil {
 			return shim.Error(err.Error())
 		}
@@ -499,6 +498,59 @@ func (t *VotingChaincode) getCandidatesById(stub shim.ChaincodeStubInterface, ar
 	}
 	buffer.WriteString("]")
 	return shim.Success(buffer.Bytes())
+}
+
+func (t *VotingChaincode) GetFinalResult(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+	electionID := args[0]
+
+	finalResult := make(map[string]int)
+
+	startFrom := "record_" + electionID
+	EndAt := "record_" + electionID + "_z"
+
+iterateTillEnd:
+	for {
+		resultsIterator, err := stub.GetStateByRange(startFrom, EndAt)
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+		defer resultsIterator.Close()
+
+		if !resultsIterator.HasNext() {
+			break
+		}
+
+		for resultsIterator.HasNext() {
+
+			queryResponse, err := resultsIterator.Next()
+			if err != nil {
+				return shim.Error(err.Error())
+			}
+			fmt.Println("finalResualt query ", queryResponse.Key, string(queryResponse.Value))
+
+			if queryResponse.Key == startFrom {
+				if resultsIterator.HasNext() {
+					continue
+				} else {
+					break iterateTillEnd
+				}
+			}
+			startFrom = queryResponse.Key
+
+			votedTo := string(queryResponse.Value)
+			finalResult[votedTo]++
+		}
+	}
+	response, err := json.Marshal(finalResult)
+	if err != nil {
+		fmt.Println("failed to marshal response", err)
+		return shim.Error("failed to create response")
+	}
+
+	return shim.Success(response)
 }
 
 // query by range function
@@ -540,39 +592,4 @@ func (t *VotingChaincode) queryByRange(stub shim.ChaincodeStubInterface, args []
 	buffer.WriteString("]")
 	fmt.Printf("- queryByRange queryResult:\n%s\n", buffer.String())
 	return shim.Success(buffer.Bytes())
-}
-
-// ===========================================================================================
-// constructQueryResponseFromIterator constructs a JSON array containing query results from
-// a given result iterator
-// ===========================================================================================
-func constructQueryResponseFromIterator(resultsIterator shim.StateQueryIteratorInterface) (*bytes.Buffer, error) {
-	// buffer is a JSON array containing QueryResults
-	var buffer bytes.Buffer
-	buffer.WriteString("[")
-
-	bArrayMemberAlreadyWritten := false
-	for resultsIterator.HasNext() {
-		queryResponse, err := resultsIterator.Next()
-		if err != nil {
-			return nil, err
-		}
-		// Add a comma before array members, suppress it for the first array member
-		if bArrayMemberAlreadyWritten == true {
-			buffer.WriteString(",")
-		}
-		buffer.WriteString("{\"Key\":")
-		buffer.WriteString("\"")
-		buffer.WriteString(queryResponse.Key)
-		buffer.WriteString("\"")
-
-		buffer.WriteString(", \"Record\":")
-		// Record is a JSON object, so we write as-is
-		buffer.WriteString(string(queryResponse.Value))
-		buffer.WriteString("}")
-		bArrayMemberAlreadyWritten = true
-	}
-	buffer.WriteString("]")
-
-	return &buffer, nil
 }

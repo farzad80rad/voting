@@ -1,46 +1,16 @@
 package routes
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"net/http"
-	"os"
-	"strconv"
-	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/go-pg/pg/v10"
 	"github.com/hyperledger/fabric-gateway/pkg/client"
-	"github.com/joho/godotenv"
 )
-
-func goDotEnvVariable(key string) string {
-
-	// load .env file
-	err := godotenv.Load(".env")
-
-	if err != nil {
-		fmt.Println("Error loading .env file")
-	}
-
-	return os.Getenv(key)
-}
-
-type newElectionValue struct {
-	Target string `json:"target"`
-	Value  string `json:"value"`
-}
-
-type candidate struct {
-	Name       string `json:"name"`
-	StudentID  string `json:"studentID"`
-	Faculty    string `json:"faculty"`
-	Party      string `json:"party"`
-	ElectionID string `json:"electionID"`
-	Avatar     string `json:"avatar"`
-}
 
 type election struct {
 	ElectionID   string `json:"electionID"`
@@ -51,20 +21,10 @@ type election struct {
 }
 
 type voter struct {
-	StudentID  string `json:"studentID"`
-	ElectionID string `json:"electionID"`
-	Email      string `json:"email"`
+	UserID string `json:"userID"`
 }
 
 type vote struct {
-	VoterID     string `json:"voterID"`
-	CandidateID string `json:"candidateID"`
-	ElectionID  string `json:"electionID"`
-}
-
-type voteV2 struct {
-	Email       string `json:"email"`
-	Password    string `json:"password"`
 	CandidateID string `json:"candidateID"`
 	ElectionID  string `json:"electionID"`
 }
@@ -72,6 +32,124 @@ type voteV2 struct {
 type Response struct {
 	Message string `json:"message"`
 	Status  int    `json:"status"`
+}
+
+var jwtKey = []byte("my-very-secure-secret-key-1234567890")
+
+// Simulated user database
+var users = map[string]string{
+	"9831025": "1234",
+	"9831026": "1234",
+	"9831027": "1234",
+	"9831024": "1234",
+}
+
+var admins = map[string]string{
+	"9831024": "1234",
+}
+
+// Claims struct to hold JWT payload
+type Claims struct {
+	UserID string `json:"userID"`
+	Role   string `json:"role"`
+	jwt.RegisteredClaims
+}
+
+// Middleware for JWT validation
+func JwtMiddleware(roles ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tokenStr := c.GetHeader("Authorization")
+		if tokenStr == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, "Missing token")
+			return
+		}
+
+		claims := &Claims{}
+		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, errors.New("invalid signing method")
+			}
+			return jwtKey, nil
+		})
+
+		if err != nil || !token.Valid {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, "Invalid token")
+			return
+		}
+
+		// Check role authorization
+		for _, role := range roles {
+			if claims.Role == role {
+
+				fmt.Println("has permision")
+				c.Set("userID", claims.UserID)
+				c.Set("role", claims.Role)
+				c.Next()
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusUnauthorized, "user does not have the access")
+		return
+	}
+
+}
+
+// Generate JWT Token
+func GenerateToken(username, role string) (string, error) {
+	expirationTime := time.Now().Add(24 * time.Hour)
+	claims := &Claims{
+		UserID: username,
+		Role:   role,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expirationTime),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(jwtKey)
+}
+
+func Authenticate(c *gin.Context) {
+
+	var creds struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+
+	if err := c.ShouldBindJSON(&creds); err != nil {
+		c.AbortWithStatusJSON(http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+
+	// Validate role
+	if creds.Role != "admin" && creds.Role != "user" {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, "Invalid username or password")
+		return
+	}
+
+	if creds.Role == "admin" {
+		// Validate user credentials
+		if storedPassword, exists := admins[creds.Username]; !exists || storedPassword != creds.Password {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, "Invalid username or password")
+			return
+		}
+	} else {
+		// Validate user credentials
+		if storedPassword, exists := users[creds.Username]; !exists || storedPassword != creds.Password {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, "Invalid username or password")
+			return
+		}
+	}
+
+	// Generate token
+	token, err := GenerateToken(creds.Username, creds.Role)
+	if err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, "Failed to generate token")
+		return
+	}
+
+	c.JSON(http.StatusOK, token)
 }
 
 func SetupRouter(contract *client.Contract) *gin.Engine {
@@ -85,75 +163,40 @@ func SetupRouter(contract *client.Contract) *gin.Engine {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// Create a buffered channel to queue incoming requests
-	requestQueue := make(chan *gin.Context, 100)
-	// Create a WaitGroup to track the number of active requests
-	var wg sync.WaitGroup
-	var mutex sync.Mutex
-	go func() {
-		for ctx := range requestQueue {
-			// Increment the WaitGroup counter
-			wg.Add(1)
-			// Process the request
-			go castVoteV2(contract, ctx, &wg, &mutex)
-		}
-	}()
-
 	v1 := r.Group("/api/v1")
 	{
-		v1.GET("/ping", pong)
-		v1.GET("/hello", helloWorld)
-		v1.POST("/candidate", func(c *gin.Context) {
+		v1.POST("/authenticate", Authenticate)
+		v1.GET("/ping", JwtMiddleware("user", "admin"), pong)
+		v1.GET("/hello", JwtMiddleware("user", "admin"), helloWorld)
+		v1.POST("/candidate", JwtMiddleware("admin"), func(c *gin.Context) {
 			createCandidate(contract, c)
 		})
-		v1.GET("/candidate", func(c *gin.Context) {
+		v1.GET("/candidate", JwtMiddleware("user", "admin"), func(c *gin.Context) {
 			getAllCandidates(contract, c)
 		})
-		v1.GET("/candidate/:electionID", func(c *gin.Context) {
+		v1.GET("/candidate/:electionID", JwtMiddleware("user", "admin"), func(c *gin.Context) {
 			getCandidatesByElectionId(contract, c)
 		})
-		v1.POST("/election", func(c *gin.Context) {
+		v1.POST("/election", JwtMiddleware("admin"), func(c *gin.Context) {
 			createElection(contract, c)
 		})
-		v1.GET("/election/:electionID", func(c *gin.Context) {
+		v1.GET("/election/:electionID", JwtMiddleware("user", "admin"), func(c *gin.Context) {
 			getElectionById(contract, c)
 		})
-		v1.PUT("/election/:electionID", func(c *gin.Context) {
-			updateElection(contract, c)
-		})
-		v1.GET("/election", func(c *gin.Context) {
+		v1.GET("/election", JwtMiddleware("user", "admin"), func(c *gin.Context) {
 			getAllElections(contract, c)
 		})
-		v1.POST("/voter", func(c *gin.Context) {
+		v1.POST("/voter", JwtMiddleware("admin"), func(c *gin.Context) {
 			createVoter(contract, c)
 		})
-		v1.GET("/voters", func(c *gin.Context) {
+		v1.GET("/voters", JwtMiddleware("user", "admin"), func(c *gin.Context) {
 			getAllVoters(contract, c)
 		})
-		v1.POST("/vote", func(c *gin.Context) {
-			castVote(contract, c)
+		v1.GET("/voter/:voterID", JwtMiddleware("user", "admin"), func(context *gin.Context) {
+			getVoter(contract, context)
 		})
-
-	}
-	v2 := r.Group("/api/v2")
-	{
-		v2.POST("/ballot/vote", func(c *gin.Context) {
-			// Create a channel to receive the response
-			responseChan := make(chan *Response)
-
-			c.Set("responseChan", responseChan)
-			// Add the request and response channel to the queue
-			requestQueue <- c
-
-			// Wait for the response from the goroutine processing the request
-			response := <-responseChan
-
-			// Send the response back to the client
-			c.JSON(response.Status, gin.H{
-				"message": response.Message,
-				"status":  response.Status,
-			})
-
+		v1.POST("/vote", JwtMiddleware("user", "admin"), func(c *gin.Context) {
+			castVote(contract, c)
 		})
 	}
 	return r
@@ -182,452 +225,4 @@ func helloWorld(c *gin.Context) {
 		"message": "hello world",
 		"status":  http.StatusOK,
 	})
-}
-
-// @Summary Create Candidate
-// @Description Create a new candidate
-// @Tags Candidate
-// @Accept  json
-// @Produce  json
-// @Body  {object} name, studentID, electionID, faculty, party, avatar
-// @Success 200 {string} string "Candidate created"
-// @Router /candidate [post]
-func createCandidate(contract *client.Contract, c *gin.Context) {
-
-	// get candidate studentName, studentId and electionId from request body
-	var candidate candidate
-	if err := c.ShouldBindJSON(&candidate); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	_, err := contract.SubmitTransaction("createCandidate", candidate.Name, candidate.StudentID, candidate.ElectionID, candidate.Faculty, candidate.Party, candidate.Avatar)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to submit transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-
-	// retunr in json
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Candidate created. Txn committed successfully.",
-		"status":  http.StatusCreated,
-	})
-}
-
-// @Summary Get all Candidates
-// @Description Get all candidates
-// @Tags Candidate
-// @Accept  json
-// @Produce  json
-// @Success 200 {string} string "Candidates fetched"
-// @Router /candidate [get]
-func getAllCandidates(contract *client.Contract, c *gin.Context) {
-	result, err := contract.EvaluateTransaction("queryByRange", "candidate.", "candidate.z")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to evaluate transaction: %w", err))
-	}
-
-	var response interface{}
-	err = json.Unmarshal(result, &response)
-	if err != nil {
-		c.JSON(http.StatusRequestTimeout, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Candidates fetched",
-		"status":  http.StatusOK,
-		"data":    response,
-	})
-}
-
-// @Summary Get Candidate
-// @Description Get candidate by electionID
-// @Tags Candidate
-// @Accept  json
-// @Produce  json
-// @Param electionID path string true "Election ID"
-// @Success 200 {string} string "Candidates fetched"
-// @Router /candidate/{electionID} [get]
-func getCandidatesByElectionId(contract *client.Contract, c *gin.Context) {
-	electionID := c.Param("electionID")
-	result, err := contract.EvaluateTransaction("getCandidatesById", electionID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to evaluate transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction result: %s\n", string(result))
-
-	var response interface{}
-	err = json.Unmarshal(result, &response)
-	if err != nil {
-		c.JSON(http.StatusRequestTimeout, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to unmarshal JSON data: %w", err))
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Candidates fetched",
-		"data":    response,
-		"status":  http.StatusOK,
-	})
-}
-
-// @Summary Create Election
-// @Description Create a new election
-// @Tags Election
-// @Accept  json
-// @Produce  json
-// @Body  {object} election
-// @Success 200 {string} string "Election created"
-// @Router /election [post]
-func createElection(contract *client.Contract, c *gin.Context) {
-
-	var election election
-	if err := c.ShouldBindJSON(&election); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// generate electionID using timestamp
-	// eg election.1621234567
-	// which translates to election.<timestamp>
-	currentTime := time.Now()
-	electionID := fmt.Sprintf("election.%d", currentTime.Unix())
-	// time in readable utc
-	createdAt := currentTime.UTC().String()
-
-	_, err := contract.SubmitTransaction("createElection", election.ElectionName, election.StartDate, election.EndDate, electionID, createdAt)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to submit transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Election created. Txn committed successfully.",
-		"status":  http.StatusCreated,
-		"data": gin.H{
-			"electionID": electionID,
-		},
-	})
-}
-
-// @Summary Get Election by id
-// @Description Get election by electionID
-// @Tags Election
-// @Accept  json
-// @Produce  json
-// @Param electionID path string true "Election ID"
-// @Success 200 {string} string "Election created"
-// @Router /election/{electionID} [get]
-func getElectionById(contract *client.Contract, c *gin.Context) {
-	electionID := c.Param("electionID")
-	result, err := contract.EvaluateTransaction("getElectionById", electionID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to evaluate transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction result: %s\n", string(result))
-
-	var response interface{}
-	err = json.Unmarshal(result, &response)
-	if err != nil {
-		c.JSON(http.StatusRequestTimeout, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to unmarshal JSON data: %w", err))
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Election fetched",
-		"data":    response,
-		"status":  http.StatusOK,
-	})
-}
-
-// @Summary Get All Elections
-// @Description Get all elections
-// @Tags Election
-// @Accept  json
-// @Produce  json
-// @Success 200 {string} string "Elections fetched"
-// @Router /election [get]
-func getAllElections(contract *client.Contract, c *gin.Context) {
-	// get all elections using queryByRange function chaincode
-	result, err := contract.EvaluateTransaction("queryByRange", "election.", "election.z")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to query transaction: %w", err))
-	}
-
-	fmt.Printf("*** Elections fetched successfully\n")
-
-	var response interface{}
-	err = json.Unmarshal(result, &response)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to unmarshal JSON data: %w", err))
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Elections fetched successfully.",
-		"data":    response,
-		"status":  http.StatusOK,
-	})
-
-}
-
-// @Summary Get All Voters
-// @Description Get all voters
-// @Tags Election
-// @Accept  json
-// @Produce  json
-// @Success 200 {string} string "Elections fetched"
-// @Router /voters [get]
-func getAllVoters(contract *client.Contract, c *gin.Context) {
-	// get all elections using queryByRange function chaincode
-	result, err := contract.EvaluateTransaction("queryByRange", "voter.", "voter.z")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to query transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction result: %s\n", string(result))
-
-	var response interface{}
-	err = json.Unmarshal(result, &response)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to unmarshal JSON data: %w", err))
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Elections fetched successfully.",
-		"data":    response,
-		"status":  http.StatusOK,
-	})
-
-}
-
-// update election
-// @Summary Update Election
-// @Description Update election by electionID
-// @Tags Election
-// @Accept  json
-// @Produce  json
-// @Param electionID path string true "Election ID"
-// @Body  {object} target, value
-// @Success 200 {string} string "Election updated"
-// @Router /election/{electionID} [put]
-func updateElection(contract *client.Contract, c *gin.Context) {
-	electionID := c.Param("electionID")
-
-	// the chaincode takes electionID, target field and new value
-	// eg updateElection(electionID, "electionName", "new election name")
-
-	var newElectionValue newElectionValue
-	if err := c.ShouldBindJSON(&newElectionValue); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	_, err := contract.SubmitTransaction("updateElection", electionID, newElectionValue.Target, newElectionValue.Value)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to submit transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Election updated. Txn committed successfully.",
-		"status":  http.StatusOK,
-	})
-}
-
-// @Summary Create Voter
-// @Description Create a new voter
-// @Tags Voter
-// @Accept  json
-// @Produce  json
-// @Body  {object} name, studentID, electionID
-// @Success 200 {string} string "Voter created"
-// @Router /voter [post]
-func createVoter(contract *client.Contract, c *gin.Context) {
-
-	var voter voter
-	if err := c.ShouldBindJSON(&voter); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	_, err := contract.SubmitTransaction("createVoter", voter.StudentID, voter.ElectionID, voter.Email)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to submit transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Voter created. Txn committed successfully.",
-		"status":  http.StatusCreated,
-	})
-}
-
-// @Summary vote
-// @Description vote for a candidate
-// @Tags Ballot
-// @Accept  json
-// @Produce  json
-// @Body  {object} voterID, candidateID
-// @Success 200 {string} string "Vote casted"
-// @Router /ballot/vote [post]
-func castVote(contract *client.Contract, c *gin.Context) {
-
-	var vote vote
-	if err := c.ShouldBindJSON(&vote); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	_, err := contract.SubmitTransaction("vote", vote.VoterID, vote.CandidateID, vote.ElectionID)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		panic(fmt.Errorf("failed to submit transaction: %w", err))
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Vote casted. Txn committed successfully.",
-		"status":  http.StatusOK,
-	})
-}
-
-// @Summary vote v2
-// @Description vote for a candidate
-// @Tags Ballot
-// @Accept  json
-// @Produce  json
-// @Body  {object} voterEmail, password, candidateID, ElectionID
-// @Success 200 {string} string "Vote casted"
-func castVoteV2(contract *client.Contract, c *gin.Context, wg *sync.WaitGroup, mutex *sync.Mutex) {
-	defer wg.Done()
-
-	mutex.Lock()
-	// unlock at the end of the function
-	defer mutex.Unlock()
-
-	var voteV2 voteV2
-	if err := c.ShouldBindJSON(&voteV2); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	doServer := goDotEnvVariable("DB_STRING")
-
-	opt, err := pg.ParseURL(doServer)
-
-	if err != nil {
-		panic(err)
-	}
-
-	db := pg.Connect(opt)
-
-	// connect pgsql
-	// db := pg.Connect(&pg.Options{
-	// 	Addr:     ":5432",
-	// 	User:     "postgres",
-	// 	Password: "admin",
-	// 	Database: "fabric-voting-users",
-	// })
-
-	// if connection fails
-	if db == nil {
-		fmt.Println("Error connecting to database")
-	}
-
-	// get user with email and salted password
-	type user struct {
-		tableName struct{} `pg:"auth.users"`
-		Email     string
-		Password  string
-		Id        int
-		Faculty   string
-	}
-
-	// unsalt password using pgcrypto
-	var u user
-	err = db.Model(&u).
-		Where("email = ?", voteV2.Email).
-		Where("password = crypt(?, password)", voteV2.Password).
-		Select()
-
-	responseChan, ok := c.Get("responseChan")
-	if !ok {
-		// If the response channel is not found, log an error and return
-		fmt.Println("Response channel not found in context")
-		response := &Response{
-			Message: "Response channel not found in context",
-			Status:  http.StatusInternalServerError,
-		}
-
-		// Send the response back through the channel
-		responseChan.(chan *Response) <- response
-	}
-
-	if err != nil {
-		// return error message wrong email or password
-		response := &Response{
-			Message: "Wrong email or password",
-			Status:  http.StatusBadRequest,
-		}
-
-		// Send the response back through the channel
-		responseChan.(chan *Response) <- response
-		return
-	}
-
-	// get user id from PG
-	userID := strconv.Itoa(u.Id)
-	fmt.Println(voteV2.CandidateID, voteV2.ElectionID, userID)
-
-	// run chaincode ballot v2 here
-	_, err = contract.SubmitTransaction("voteV2", userID, voteV2.CandidateID, voteV2.ElectionID)
-
-	if err != nil {
-		response := &Response{
-			Message: err.Error(),
-			Status:  http.StatusBadRequest,
-		}
-
-		responseChan, ok := c.Get("responseChan")
-		if !ok {
-			// If the response channel is not found, log an error and return
-			fmt.Println("Response channel not found in context")
-			response = &Response{
-				Message: "Response channel not found in context",
-				Status:  http.StatusInternalServerError,
-			}
-		}
-
-		// Send the response back through the channel
-		responseChan.(chan *Response) <- response
-		return
-	}
-
-	fmt.Printf("*** Transaction committed successfully\n")
-
-	response := &Response{
-		Message: "Vote casted. Txn committed successfully.",
-		Status:  http.StatusOK,
-	}
-
-	// Send the response back through the channel
-	responseChan.(chan *Response) <- response
-
 }
