@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/x509"
 	"fmt"
+	"github.com/spf13/cast"
 	"os"
 	"path"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"github.com/hyperledger/fabric-gateway/pkg/client"
 	"github.com/hyperledger/fabric-gateway/pkg/identity"
 	_ "github.com/izqalan/fabric-voting/app/docs"
-	r "github.com/izqalan/fabric-voting/app/routes"
+	routers "github.com/izqalan/fabric-voting/app/routes"
 	swaggerFiles "github.com/swaggo/files"
 	ginSwagger "github.com/swaggo/gin-swagger"
 	"google.golang.org/grpc"
@@ -72,11 +73,33 @@ func main() {
 		channelName = cname
 	}
 
+	fmt.Println("---------")
+	fmt.Println(chaincodeName)
+	fmt.Println(channelName)
+
 	network := gw.GetNetwork(channelName)
 	contract := network.GetContract(chaincodeName)
 
+	// Simulated user database
+	var users = map[string]string{
+		"9831025": "1234",
+		"9831026": "1234",
+		"9831027": "1234",
+		"9831024": "1234",
+	}
+
+	for i := 0; i < 5000; i++ {
+		users["user"+cast.ToString(i)] = "user" + cast.ToString(i)
+	}
+
+	var admins = map[string]string{
+		"9831024": "1234",
+	}
+
 	// Rest Endpoints
-	r := r.SetupRouter(contract)
+	r := routers.SetupRouter(contract, routers.AuthCredentials{
+		Users: users, Admins: admins,
+	})
 
 	// Swagger Endpoints
 	r.GET("/docs/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))

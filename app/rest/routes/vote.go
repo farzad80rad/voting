@@ -10,6 +10,20 @@ import (
 	"strings"
 )
 
+type voter struct {
+	UserID string `json:"userID"`
+}
+
+type Vote struct {
+	CandidateID string `json:"candidateID"`
+	ElectionID  string `json:"electionID"`
+}
+
+type Response struct {
+	Message string `json:"message"`
+	Status  int    `json:"status"`
+}
+
 type voterHistory struct {
 	Id              string             `json:"id"`
 	ElectionHistory []voterHistoryItem `json:"electionHistory"`
@@ -154,6 +168,8 @@ func createVoter(contract *client.Contract, c *gin.Context) {
 		return
 	}
 
+	fmt.Println("this is voter", voter)
+
 	_, err := contract.SubmitTransaction("createVoter", voter.UserID)
 	if err != nil {
 		if s, ok := status.FromError(err); ok {
@@ -172,17 +188,17 @@ func createVoter(contract *client.Contract, c *gin.Context) {
 	})
 }
 
-// @Summary vote
-// @Description vote for a candidate
+// @Summary Vote
+// @Description Vote for a Candidate
 // @Tags Ballot
 // @Accept  json
 // @Produce  json
 // @Body  {object} voterID, candidateID
 // @Success 200 {string} string "Vote casted"
-// @Router /ballot/vote [post]
+// @Router /ballot/Vote [post]
 func castVote(contract *client.Contract, c *gin.Context) {
 
-	var vote vote
+	var vote Vote
 	if err := c.ShouldBindJSON(&vote); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -194,6 +210,7 @@ func castVote(contract *client.Contract, c *gin.Context) {
 		panic(fmt.Errorf("userID not found in contex"))
 	}
 
+	fmt.Println("vote Info", userID, vote)
 	_, err := contract.SubmitTransaction("vote", userID.(string), vote.CandidateID, vote.ElectionID)
 	if err != nil {
 		if s, ok := status.FromError(err); ok {

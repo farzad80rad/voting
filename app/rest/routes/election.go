@@ -10,15 +10,23 @@ import (
 	"time"
 )
 
+type Election struct {
+	ElectionID   string `json:"electionID"`
+	ElectionName string `json:"electionName"`
+	StartDate    string `json:"startDate"`
+	EndDate      string `json:"endDate"`
+	UpdatedAt    string `json:"updatedAt"`
+}
+
 // update getFinalResult
-// @Summary get final result of an election
-// @Description this API will iterate over the ledger to find the exact amount of votes given to each candidate in an election
+// @Summary get final result of an Election
+// @Description this API will iterate over the ledger to find the exact amount of votes given to each Candidate in an Election
 // @Tags Election
 // @Accept  json
 // @Produce  json
 // @Param electionID path string true "Election ID"
 // @Success 200 {object} map "{'candidate1':10,'candidate2':1230}"
-// @Router /election/{electionID} [get]
+// @Router /Election/{electionID} [get]
 func getFinalResult(contract *client.Contract, c *gin.Context) {
 	electionID := c.Param("electionID")
 
@@ -36,30 +44,33 @@ func getFinalResult(contract *client.Contract, c *gin.Context) {
 		panic(fmt.Errorf("failed to get transaction: %w", err))
 	}
 
+	var r map[string]int
+	json.Unmarshal(result, &r)
+
 	c.JSON(http.StatusOK, gin.H{
-		"states": string(result),
+		"states": r,
 	})
 }
 
 // @Summary Create Election
-// @Description Create a new election
+// @Description Create a new Election
 // @Tags Election
 // @Accept  json
 // @Produce  json
-// @Body  {object} election
+// @Body  {object} Election
 // @Success 200 {string} string "Election created"
-// @Router /election [post]
+// @Router /Election [post]
 func createElection(contract *client.Contract, c *gin.Context) {
 
-	var election election
+	var election Election
 	if err := c.ShouldBindJSON(&election); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	// generate electionID using timestamp
-	// eg election.1621234567
-	// which translates to election.<timestamp>
+	// eg Election.1621234567
+	// which translates to Election.<timestamp>
 	currentTime := time.Now()
 	electionID := fmt.Sprintf("election.%d", currentTime.Unix())
 	// time in readable utc
@@ -77,23 +88,17 @@ func createElection(contract *client.Contract, c *gin.Context) {
 
 	fmt.Printf("*** Transaction committed successfully\n")
 
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Election created. Txn committed successfully.",
-		"status":  http.StatusCreated,
-		"data": gin.H{
-			"electionID": electionID,
-		},
-	})
+	c.JSON(http.StatusCreated, electionID)
 }
 
 // @Summary Get Election by id
-// @Description Get election by electionID
+// @Description Get Election by electionID
 // @Tags Election
 // @Accept  json
 // @Produce  json
 // @Param electionID path string true "Election ID"
 // @Success 200 {string} string "Election created"
-// @Router /election/{electionID} [get]
+// @Router /Election/{electionID} [get]
 func getElectionById(contract *client.Contract, c *gin.Context) {
 	electionID := c.Param("electionID")
 	result, err := contract.EvaluateTransaction("getElectionById", electionID)
@@ -128,7 +133,7 @@ func getElectionById(contract *client.Contract, c *gin.Context) {
 // @Accept  json
 // @Produce  json
 // @Success 200 {string} string "Elections fetched"
-// @Router /election [get]
+// @Router /Election [get]
 func getAllElections(contract *client.Contract, c *gin.Context) {
 	// get all elections using queryByRange function chaincode
 	result, err := contract.EvaluateTransaction("queryByRange", "election.", "election.z")
@@ -143,14 +148,13 @@ func getAllElections(contract *client.Contract, c *gin.Context) {
 
 	// Record represents a record that can either be an Election or a raw string for candidates
 	type Record struct {
-		Election  *election `json:"Record,omitempty"`
-		Candidate string    `json:"Record,omitempty"`
+		Election  *Election `json:"Record,omitempty"`
+		Candidate string    `json:"candidate,omitempty"`
 	}
 
 	// Data represents the structure of the entire JSON
 	type Data struct {
-		Key    string `json:"Key"`
-		Record Record `json:"Record"`
+		Key string `json:"Key"`
 	}
 
 	var data []Data

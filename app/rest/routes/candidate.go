@@ -16,7 +16,7 @@ var (
 	mutex           sync.Mutex
 )
 
-type candidate struct {
+type Candidate struct {
 	Name       string `json:"name"`
 	UserID     string `json:"userID"`
 	ElectionID string `json:"electionID"`
@@ -24,7 +24,6 @@ type candidate struct {
 
 type candidateState struct {
 	ElectionID string `json:"election_id"`
-	Votes      int    `json:"votes"`
 }
 
 type candidateElectionList struct {
@@ -48,25 +47,28 @@ type CandidateListLedger struct {
 func init() {
 	// clear cache in interval
 	ticker := time.NewTicker(time.Minute)
-	for range ticker.C {
-		mutex.Lock()
-		candidatesCache = make(map[string]CandidateListLedger)
-		mutex.Unlock()
-	}
+	go func() {
+		for range ticker.C {
+			mutex.Lock()
+			candidatesCache = make(map[string]CandidateListLedger)
+			mutex.Unlock()
+		}
+	}()
+
 }
 
 // @Summary Create Candidate
-// @Description Create a new candidate
+// @Description Create a new Candidate
 // @Tags Candidate
 // @Accept  json
 // @Produce  json
 // @Body  {object} name, userID, electionID, faculty, party, avatar
 // @Success 200 {string} string "Candidate created"
-// @Router /candidate [post]
+// @Router /Candidate [post]
 func createCandidate(contract *client.Contract, c *gin.Context) {
 
-	// get candidate studentName, userID and electionId from request body
-	var candidate candidate
+	// get Candidate studentName, userID and electionId from request body
+	var candidate Candidate
 	if err := c.ShouldBindJSON(&candidate); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -96,7 +98,7 @@ func createCandidate(contract *client.Contract, c *gin.Context) {
 // @Accept  json
 // @Produce  json
 // @Success 200 {string} string "Candidates fetched"
-// @Router /candidate [get]
+// @Router /Candidate [get]
 func getAllCandidates(contract *client.Contract, c *gin.Context) {
 	result, err := contract.EvaluateTransaction("queryByRange", "candidate.", "candidate.z")
 	if err != nil {
@@ -108,6 +110,8 @@ func getAllCandidates(contract *client.Contract, c *gin.Context) {
 		panic(fmt.Errorf("failed to evaluate transaction: %w", err))
 	}
 
+	fmt.Println(string(result))
+
 	var response []CandidateListLedger
 	err = json.Unmarshal(result, &response)
 	if err != nil {
@@ -118,15 +122,15 @@ func getAllCandidates(contract *client.Contract, c *gin.Context) {
 	finalRes := make([]candidateElectionList, len(response))
 
 	for i, c := range response {
+		fmt.Println("tssss", c.Record)
 		finalRes[i] = candidateElectionList{
 			Name:   c.Record.Name,
-			UserID: c.Record.Id,
+			UserID: c.Key,
 		}
 		finalRes[i].Elections = make([]candidateState, len(c.Record.Elections))
 		for j, e := range c.Record.Elections {
 			finalRes[i].Elections[j] = candidateState{
 				ElectionID: e.ElectionID,
-				Votes:      e.Votes,
 			}
 		}
 	}
@@ -139,20 +143,20 @@ func getAllCandidates(contract *client.Contract, c *gin.Context) {
 }
 
 // @Summary Get Candidate
-// @Description Get candidate by electionID
+// @Description Get Candidate by electionID
 // @Tags Candidate
 // @Accept  json
 // @Produce  json
 // @Param electionID path string true "Election ID"
 // @Success 200 {string} string "Candidates fetched"
-// @Router /candidate/{electionID} [get]
+// @Router /Candidate/{electionID} [get]
 func getCandidatesByElectionId(contract *client.Contract, c *gin.Context) {
 	electionID := c.Param("electionID")
-	if electionData, found := candidatesCache[electionID]; found {
+	/*	if electionData, found := candidatesCache[electionID]; found {
 
-	} else {
+		} else {
 
-	}
+		}*/
 	result, err := contract.EvaluateTransaction("getCandidatesById", electionID)
 	if err != nil {
 		if s, ok := status.FromError(err); ok {
@@ -178,13 +182,12 @@ func getCandidatesByElectionId(contract *client.Contract, c *gin.Context) {
 	for i, c := range response {
 		finalRes[i] = candidateElectionList{
 			Name:   c.Record.Name,
-			UserID: c.Record.Id,
+			UserID: c.Key,
 		}
 		finalRes[i].Elections = make([]candidateState, len(c.Record.Elections))
 		for j, e := range c.Record.Elections {
 			finalRes[i].Elections[j] = candidateState{
 				ElectionID: e.ElectionID,
-				Votes:      e.Votes,
 			}
 		}
 	}
